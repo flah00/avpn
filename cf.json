@@ -1,0 +1,624 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Version 1.0.0; vpn",
+
+  "Resources": {
+    "S3Key": {
+      "Type" : "AWS::KMS::Key",
+      "Properties" : {
+        "Description" : "Share data between ec2 and s3",
+        "KeyPolicy" : {
+          "Version": "2012-10-17",
+          "Id": "key-default-1",
+          "Statement": [
+            {
+              "Sid": "Enable IAM User Permissions",
+              "Effect": "Allow",
+              "Principal": {"AWS": {"Fn::Join": ["", ["arn:aws:iam::", { "Ref": "AWS::AccountId" }, ":root"]]}},
+              "Action": "kms:*",
+              "Resource": "*"
+            },
+            {
+              "Sid": "Allow administration of the key",
+              "Effect": "Allow",
+              "Resource": "*",
+              "Principal": {
+                "AWS": [
+                  {"Fn::Join": ["", ["arn:aws:iam::", { "Ref": "AWS::AccountId" }, ":user/p5p"]]}
+                ]
+              },
+              "Action": [
+                "kms:Create*",
+                "kms:Describe*",
+                "kms:Enable*",
+                "kms:List*",
+                "kms:Put*",
+                "kms:Update*",
+                "kms:Revoke*",
+                "kms:Disable*",
+                "kms:Get*",
+                "kms:Delete*",
+                "kms:ScheduleKeyDeletion",
+                "kms:CancelKeyDeletion"
+              ]
+            },
+            {
+              "Sid": "Allow VpnRole to use this key",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {"Fn::GetAtt" : [ "VpnRole", "Arn"] }
+              },
+              "Action": [
+                "kms:Decrypt",
+                "kms:GenerateDataKey*"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+      }
+    },
+    "VpnASG": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "LaunchConfigurationName": {
+          "Ref": "VpnLC"
+        },
+        "VPCZoneIdentifier": [
+          {
+            "Ref": "VpnSubnet"
+          }
+        ],
+        "MaxSize": 2,
+        "MinSize": 1,
+        "DesiredCapacity": 1,
+
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Ref": "AWS::StackName"
+            },
+            "PropagateAtLaunch": false
+          }
+        ]
+      },
+      "Metadata": {
+        "AWS::CloudFormation::Designer": {
+          "id": "89b1a2fb-030b-4448-859d-88ca6ef0e1d5"
+        }
+      }
+    },
+    "VpnLC": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Metadata": {
+        "AWS::CloudFormation::Designer": {
+          "id": "a21edef8-610d-4bc2-be72-0911d0cc2616"
+        }
+      },
+      "Properties": {
+        "SecurityGroups": [
+          { "Ref": "VpnSG" }
+        ],
+        "AssociatePublicIpAddress": true,
+        "ImageId": {
+          "Ref": "AMI"
+        },
+        "InstanceType": {"Ref":"InstanceType"},
+        "KeyName": {"Ref": "Key"},
+        "IamInstanceProfile": {
+          "Ref": "VpnIProfile"
+        },
+        "UserData": {"Fn::Base64": {"Fn::Join": ["", [
+
+          "#cloud-config\n",
+          "coreos:\n",
+          "  hostname: ",{"Ref":"VPNHostname"},"\n",
+          "  units:\n",
+          "    - name: locksmithd\n",
+          "      mask: true\n",
+          "    - name: openvpn.service\n",
+          "      command: start\n",
+          "      enable: true\n",
+          "      content: |\n",
+          "        [Unit]\n",
+          "        Description=OpenVPN service\n",
+          "        After=docker.service\n",
+          "        [Service]\n",
+          "        Restart=always\n",
+          "        ExecStartPre=/opt/openvpn.sh init\n",
+          "        ExecStart=/opt/openvpn.sh start\n",
+          "        ExecStop=/opt/openvpn.sh stop\n",
+          "\n",
+          "write_files:\n",
+          "  - path: /etc/default/openvpn\n",
+          "    permissions: 0600\n",
+          "    owner: root\n",
+          "    content: |\n",
+          "      OVPN_DATA=${OVPN_DATA:-openvpn}\n",
+          "      DOMAIN=${DOMAIN:-", {"Ref":"HostedZoneName"}, "}\n",
+          "      BUCKET=", {"Ref":"Bucket"}, "\n",
+          "      S3_PATH=$BUCKET/$OVPN_DATA\n",
+          "\n",
+          "  - path: /etc/profile.d/aws.sh\n",
+          "    permissions: 0644\n",
+          "    owner: root\n",
+          "    content: |\n",
+          "      alias aws='docker run $DOCKER_ARGS -v $PWD:/work -w /work --rm -ti amazon/aws-cli --region ", {"Ref":"AWS::Region"}, "'\n",
+          "\n",
+          "  - path: \"/opt/openvpn.sh\"\n",
+          "    permissions: 0755\n",
+          "    owner: \"root\"\n",
+          "    content: |\n",
+          "      #!/bin/sh\n",
+          "      . /etc/default/openvpn\n",
+          "\n",
+          "      function aws() {\n",
+          "        docker run -v $OVPN_DATA:/etc/openvpn -v $PWD:/work -w /work --rm amazon/aws-cli --region us-east-1 $*\n",
+          "      }\n",
+          "      function s3_sync() {\n",
+          "        if [ $1 = 'to' ]; then\n",
+          "          aws s3 sync /etc/openvpn s3://$S3_PATH --delete\n",
+          "        else\n",
+          "          aws s3 sync s3://$S3_PATH /etc/openvpn\n",
+          "        fi\n",
+          "      }\n",
+          "      case $1 in\n",
+          "        init)\n",
+          "          if ! docker volume ls $OVPN_DATA >/dev/null 2>&1; then\n",
+          "            $0 update-route53\n",
+          "            docker volume create --name $OVPN_DATA\n",
+          "\n",
+          "            if [ '`aws s3 ls $S3_PATH`' = '' ]; then\n",
+          "              # config directory is empty, initialize it\n",
+          "              docker run -v $OVPN_DATA:/etc/openvpn --rm kylemanna/openvpn ovpn_genconfig -u udp://$DOMAIN\n",
+          "              # copy configs to s3\n",
+          "              s3_sync to\n",
+          "              echo \"OPENVPN INITIALIZED, YOU MUST RUN: echo ssh -i SSH_KEY core@$DOMAIN sudo /opt/openvpn.sh init-pki\" >/tmp/init-pki\n",
+          "              exit 1\n",
+          "            else\n",
+          "              # copy configs to volume\n",
+          "              s3_sync from\n",
+          "            fi\n",
+          "          fi\n",
+          "          if ! docker inspect openvpn >/dev/null 2>&1 | grep -q ovpn_run; then\n",
+          "            docker create --name openvpn -v $OVPN_DATA:/etc/openvpn -p 1194:1194/udp --cap-add=NET_ADMIN kylemanna/openvpn\n",
+          "          fi\n",
+          "        ;;\n",
+          "        init-pki)\n",
+          "          docker run -v $OVPN_DATA:/etc/openvpn --rm -it kylemanna/openvpn ovpn_initpki\n",
+          "          s3_sync to\n",
+          "          rm /tmp/init-pki\n",
+          "          systemctl restart openvpn\n",
+          "        ;;\n",
+          "        start)\n",
+          "          if [ -f /tmp/init-pki ]; then\n",
+          "            logger -s -f /tmp/init-pki\n",
+          "            exit 1\n",
+          "          fi\n",
+          "          docker start -a openvpn\n",
+          "        ;;\n",
+          "        stop)\n",
+          "          docker stop openvpn\n",
+          "        ;;\n",
+          "        restart)\n",
+          "          systemctl stop openvpn\n",
+          "          systemctl start openvpn\n",
+          "        ;;\n",
+          "        update-route53)\n",
+          "          ZONE_ID=$(aws route53 list-hosted-zones-by-name --query 'HostedZones[*][Id,Name]' --output text | grep ", {"Ref":"HostedZoneName"}, "| awk '{print$1}')\n",
+          "          IP=$(curl http://169.254.169.254/latest/meta-data/public-ipv4)\n",
+          "          RR_UPSERT='{\n",
+          "          \"Comment\": \"update a record\",\n",
+          "          \"Changes\": [\n",
+          "              {\n",
+          "                  \"Action\": \"UPSERT\",\n",
+          "                  \"ResourceRecordSet\": {\n",
+          "                      \"Name\": \"%s\",\n",
+          "                      \"Type\": \"A\",\n",
+          "                      \"TTL\": 30,\n",
+          "                      \"ResourceRecords\": [ { \"Value\": \"%s\" } ]\n",
+          "                  }\n",
+          "              }\n",
+          "          ]\n",
+          "      }'\n",
+          "          printf \"$RR_UPSERT\" $DOMAIN $IP > r53\n",
+          "          aws route53 change-resource-record-sets --hosted-zone-id $ZONE_ID --change-batch file:///work/r53\n",
+          "          rm -f r53\n",
+          "        ;;\n",
+          "        upgrade-container)\n",
+          "          systemctl stop openvpn\n",
+          "          docker rm -f openvpn\n",
+          "          docker pull kylemanna/openvpn\n",
+          "          docker rmi $(docker images --filter dangling=true -q)\n",
+          "          systemctl start openvpn\n",
+          "        ;;\n",
+          "        gen*)\n",
+          "          cli=${2:?Missing client}\n",
+          "          docker run -v $OVPN_DATA:/etc/openvpn --rm -it kylemanna/openvpn easyrsa build-client-full ${cli} nopass\n",
+          "        ;;\n",
+          "        get)\n",
+          "          cli=${2:?Missing client}\n",
+          "          docker run -v $OVPN_DATA:/etc/openvpn --rm kylemanna/openvpn ovpn_getclient ${cli} > ${cli}.ovpn\n",
+          "        ;;\n",
+          "        *)\n",
+          "          echo \"$0 {init|start|stop|restart|upgrade-container|gen CLIENT|get CLIENT}\"\n",
+          "          exit 1\n",
+          "        ;;\n",
+          "      esac\n"
+
+        ]]}}
+
+      },
+
+      "DependsOn": [
+        "VpnRole"
+      ]
+    },
+    "VpnVPC": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {
+        "EnableDnsSupport": true,
+        "EnableDnsHostnames": true,
+        "CidrBlock": "10.254.0.0/16",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Ref": "AWS::StackName"
+            }
+          }
+        ]
+      },
+      "Metadata": {
+        "AWS::CloudFormation::Designer": {
+          "id": "84544de5-27e9-4748-a2de-be74414d7dbe"
+        }
+      }
+    },
+    "VpnSubnet": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": {
+          "Ref": "VpnVPC"
+        },
+        "MapPublicIpOnLaunch": true,
+        "AvailabilityZone": {"Ref": "AZ"},
+        "CidrBlock": "10.254.254.0/24"
+      },
+      "Metadata": {
+        "AWS::CloudFormation::Designer": {
+          "id": "9a22905d-84df-4e54-a549-6de8eb7f98e9"
+        }
+      },
+      "DependsOn": [
+        "VpnVPC"
+      ]
+    },
+    "VpnSG": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "VpcId": {
+          "Ref": "VpnVPC"
+        },
+        "GroupDescription": "OpenVPN Rules",
+        "SecurityGroupIngress": [
+          {
+            "CidrIp": "0.0.0.0/0",
+            "IpProtocol": "UDP",
+            "FromPort": 1194,
+            "ToPort": 1194
+          },
+          {
+            "CidrIp": "0.0.0.0/0",
+            "IpProtocol": "TCP",
+            "FromPort": 80,
+            "ToPort": 80
+          },
+          {
+            "CidrIp": "0.0.0.0/0",
+            "IpProtocol": "TCP",
+            "FromPort": 443,
+            "ToPort": 443
+          },
+          {
+            "CidrIp": {
+              "Ref": "AllowSshFrom"
+            },
+            "IpProtocol": "TCP",
+            "FromPort": 22,
+            "ToPort": 22
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Ref": "AWS::StackName"
+            }
+          }
+        ]
+      },
+      "Metadata": {
+        "AWS::CloudFormation::Designer": {
+          "id": "82352a68-536a-4c20-a305-4e9723e3c579"
+        }
+      },
+      "DependsOn": [
+        "VpnVPC"
+      ]
+    },
+    "VpnIG": {
+      "Type": "AWS::EC2::InternetGateway",
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Ref": "AWS::StackName"
+            }
+          }
+        ]
+      },
+      "Metadata": {
+        "AWS::CloudFormation::Designer": {
+          "id": "f0893db0-add1-4fb5-a513-63620a5c9c7e"
+        }
+      }
+    },
+    "VpnDO": {
+      "Type": "AWS::EC2::DHCPOptions",
+      "Properties": {
+        "DomainNameServers": [
+          "8.8.4.4",
+          "8.8.8.8"
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Ref": "AWS::StackName"
+            }
+          }
+        ]
+      },
+      "Metadata": {
+        "AWS::CloudFormation::Designer": {
+          "id": "cc8422a2-3772-4bed-9036-b99711f32a00"
+        }
+      }
+    },
+    "VpcDHCPOA": {
+      "Type": "AWS::EC2::VPCDHCPOptionsAssociation",
+      "Properties": {
+        "DhcpOptionsId": {
+          "Ref": "VpnDO"
+        },
+        "VpcId": {
+          "Ref": "VpnVPC"
+        }
+      },
+      "Metadata": {
+        "AWS::CloudFormation::Designer": {
+          "id": "8547cc39-b356-4810-ba1a-113979a3494c"
+        }
+      }
+    },
+    "VpnGA": {
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+      "Properties": {
+        "InternetGatewayId": {
+          "Ref": "VpnIG"
+        },
+        "VpcId": {
+          "Ref": "VpnVPC"
+        }
+      },
+      "Metadata": {
+        "AWS::CloudFormation::Designer": {
+          "id": "accd3ed4-73d7-49bc-a148-8df49533f4cd"
+        }
+      }
+    },
+    "VpnRoute": {
+      "Type": "AWS::EC2::Route",
+      "Properties": {
+        "GatewayId": {
+          "Ref": "VpnIG"
+        },
+        "RouteTableId": {
+          "Ref": "VpnRT"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0"
+      },
+      "Metadata": {
+        "AWS::CloudFormation::Designer": {
+          "id": "c9e4d3e5-2069-4595-bcf6-695bbb10d8c4"
+        }
+      }
+    },
+    "VpnRT": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": {
+          "Ref": "VpnVPC"
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Ref": "AWS::StackName"
+            }
+          }
+        ]
+      },
+      "Metadata": {
+        "AWS::CloudFormation::Designer": {
+          "id": "f7770436-0117-461e-808b-202f89b5c864"
+        }
+      }
+    },
+    "VpnRTA": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "VpnRT"
+        },
+        "SubnetId": {
+          "Ref": "VpnSubnet"
+        }
+      },
+      "Metadata": {
+        "AWS::CloudFormation::Designer": {
+          "id": "8cd2dd74-7391-44ff-95fe-ae4c99455321"
+        }
+      }
+    },
+    "VpnIProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Roles": [
+          {
+            "Ref": "VpnRole"
+          }
+        ]
+      },
+      "Metadata": {
+        "AWS::CloudFormation::Designer": {
+          "id": "4cc4f58d-55a3-46c1-b76f-b0a1916a7370"
+        }
+      }
+    },
+    "VpnRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "ec2.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/"
+      },
+      "Metadata": {
+        "AWS::CloudFormation::Designer": {
+          "id": "19644da1-adff-45c9-b9c5-7296714d01ff"
+        }
+      }
+    },
+    "VpnPolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Properties": {
+        "PolicyName": "s3rw",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:Put*",
+                "s3:Get*",
+                "s3:List*"
+              ],
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:aws:s3:::",
+                      {
+                        "Ref": "Bucket"
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:aws:s3:::",
+                      {
+                        "Ref": "Bucket"
+                      },
+                      "/*"
+                    ]
+                  ]
+                }
+              ]
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "route53:Change*",
+                "route53:List*"
+              ],
+              "Resource": "*"
+            }
+          ]
+        },
+        "Roles": [
+          {
+            "Ref": "VpnRole"
+          }
+        ]
+      },
+      "Metadata": {
+        "AWS::CloudFormation::Designer": {
+          "id": "c722d649-9328-42eb-9380-ca6895599364"
+        }
+      }
+    }
+  },
+  "Parameters": {
+    "AMI": {
+      "Type": "String",
+      "Default": "",
+      "Description": "us-east-1 ami for flatcar"
+    },
+    "AZ": {
+      "Type": "String",
+      "Default": "us-east-1b",
+      "Description": "Availability Zone for the VPC"
+    },
+    "AllowSshFrom": {
+      "Type": "String",
+      "Default": "0.0.0.0/0",
+      "Description": "SSH bastion host"
+    },
+    "Bucket": {
+      "Type": "String",
+      "Default": "",
+      "Description": "S3 Bucket, used to manage VPN configs"
+    },
+    "HostedZoneName": {
+      "Type": "String",
+      "Default": "",
+      "Description": "Route53 zone to update"
+    },
+    "VPNHostname": {
+      "Type": "String",
+      "Default": "",
+      "Description": "The hostname of the VPN server"
+    },
+    "InstanceType": {
+      "Type": "String",
+      "Default": "t2.medium",
+      "Description": "VPN instance type"
+    },
+    "Key": {
+      "Type": "AWS::EC2::KeyPair::KeyName",
+      "Default": "",
+      "Description": "Ssh key name"
+    }
+  }
+}
