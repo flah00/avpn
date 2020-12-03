@@ -27,22 +27,22 @@ A simple VPN, which relies on S3, KMS, OpenVPN, and Flatcar
 1. `aws ec2 enable-ebs-encryption-by-default`
 1. `aws s3 mb s3://$BUCKET`
 1. If your domain is not registered with R53, create a hosted zone for it
-1. 
-```
-    aws cloudformation create-stack \
-      --stack-name avpn \
-      --template-body file://cf.json \
-      --capabilities CAPABILITY_IAM \
-      --parameters \
-        ParameterKey=AMI,ParameterValue=$AMI \
-        ParameterKey=AZ,ParameterValue=$AZ \
-        ParameterKey=Bucket,ParameterValue=$BUCKET \
-        ParameterKey=HostedZoneName,ParameterValue=$ZONE \
-        ParameterKey=VPNHostname,ParameterValue=$ZONE \
-        ParameterKey=Key,ParameterValue=$KEY_NAME \
-        ParameterKey=InstanceType,ParameterValue=t3.small \
-        ParameterKey=IAMUser,ParameterValue="" \
-        ParameterKey=RootVolumeSize,ParameterValue=10 \
-        ParameterKey=EphemeralDockerPartition,ParameterValue=false
-```
+1. Create the stack
+  ```
+  aws cloudformation create-stack \
+    --stack-name avpn \
+    --template-body file://cf.json \
+    --capabilities CAPABILITY_IAM \
+    --parameters \
+      ParameterKey=AMI,ParameterValue=$AMI \
+      ParameterKey=AZ,ParameterValue=$AZ \
+      ParameterKey=Bucket,ParameterValue=$BUCKET \
+      ParameterKey=HostedZoneName,ParameterValue=$ZONE \
+      ParameterKey=VPNHostname,ParameterValue=$ZONE \
+      ParameterKey=Key,ParameterValue=$KEY_NAME \
+      ParameterKey=InstanceType,ParameterValue=t3.small \
+      ParameterKey=IAMUser,ParameterValue="" \
+      ParameterKey=RootVolumeSize,ParameterValue=10 \
+      ParameterKey=EphemeralDockerPartition,ParameterValue=false
+  ```
 1. Encrypt the bucket, using the new KMS key
