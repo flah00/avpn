@@ -19,7 +19,6 @@ A simple VPN, which relies on S3, KMS, OpenVPN, and Flatcar
 ## Install 
 
 1. `KEY_NAME=YOUR_KEY_NAME`
-1. `INSTANCE_TYPE=t3.small`
 1. `ZONE=YOUR_HOSTED_ZONE`
 1. `BUCKET=YOUR_BUCKET_NAME`
 1. `AZ=YOUR_AVAILABILITY_ZONE`
@@ -29,6 +28,7 @@ A simple VPN, which relies on S3, KMS, OpenVPN, and Flatcar
 1. `aws s3 mb s3://$BUCKET`
 1. If your domain is not registered with R53, create a hosted zone for it
 1. 
+```
     aws cloudformation create-stack \
       --stack-name avpn \
       --template-body file://cf.json \
@@ -44,4 +44,5 @@ A simple VPN, which relies on S3, KMS, OpenVPN, and Flatcar
         ParameterKey=IAMUser,ParameterValue="" \
         ParameterKey=RootVolumeSize,ParameterValue=10 \
         ParameterKey=EphemeralDockerPartition,ParameterValue=false
+```
 1. Encrypt the bucket, using the new KMS key
