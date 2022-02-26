@@ -1,6 +1,5 @@
 #!/bin/bash
 . /etc/default/openvpn
-IMAGE=${IMAGE:-flah00/openvpn}
 
 function aws() {
   docker run -v $OVPN_DATA:/etc/openvpn -v $PWD:/work -w /work --rm amazon/aws-cli --region us-east-1 $*
@@ -20,7 +19,8 @@ case $1 in
 
       if [ '`aws s3 ls $S3_PATH`' = '' ]; then
         # config directory is empty, initialize it
-        docker run -v $OVPN_DATA:/etc/openvpn --rm $IMAGE ovpn_genconfig -u udp://$DOMAIN
+        docker run -v $OVPN_DATA:/etc/openvpn --rm $IMAGE ovpn_genconfig \
+          -C $OVPN_CIPHERS -T $OVPN_CIPHERS -u udp://$DOMAIN
         # copy configs to s3
         s3_sync to
         echo "OPENVPN INITIALIZED, YOU MUST RUN: echo ssh -i SSH_KEY core@$DOMAIN sudo /opt/openvpn.sh init-pki" >/tmp/init-pki
